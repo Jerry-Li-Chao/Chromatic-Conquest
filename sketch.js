@@ -8,15 +8,15 @@ const numFactions = 4;
 const populationChangeInterval = 1000;
 const actionMinInterval = 3000;
 const actionMaxInterval = 5000;
-const animationSpeed = 0.5;
+const animationSpeed = 0.05;
 const showPopulationTransfers = true;
+const showCellPopulation = true;
 const cellPopulationLimit = 50;
 
 let cells = [];
 let factions = [];
 let isStabilized = false;
 let lastGrowthTime = 0;
-let lastActionTime = 0;
 let populationTransfers = [];
 let colorTransitions = [];
 
@@ -59,13 +59,9 @@ function draw() {
       lastGrowthTime = millis();
     }
 
-    // Perform actions every 3-5 seconds
-    if (
-      millis() - lastActionTime >
-      random(actionMinInterval, actionMaxInterval * animationSpeed)
-    ) {
-      performCellActions();
-      lastActionTime = millis();
+    // Perform actions for each cell
+    for (let cell of cells) {
+      cell.checkAndPerformAction();
     }
 
     // Update and draw population transfers
@@ -144,24 +140,12 @@ function areNeighbors(cell1, cell2) {
 function createFactionsWithNeighboringCells() {
   let unassignedCells = [...cells];
 
-  function getPaleColor() {
-    // Generate pale colors by ensuring at least one component is high
-    let r = random(190, 255);
-    let g = random(190, 255);
-    let b = random(190, 255);
-
-    // Ensure at least one component is very high (over 220)
-    const highComponent = floor(random(3));
-    if (highComponent === 0) r = random(220, 255);
-    else if (highComponent === 1) g = random(220, 255);
-    else b = random(220, 255);
-
-    return color(r, g, b);
-  }
+  // Generate distinct colors for factions
+  let factionColors = generateDistinctColors(numFactions);
 
   while (unassignedCells.length > 0 && factions.length < numFactions) {
     let startCell = random(unassignedCells);
-    let faction = new Faction(getPaleColor());
+    let faction = new Faction(factionColors[factions.length]);
     let factionCells = [startCell];
     let candidates = [...startCell.neighbors];
 
@@ -191,6 +175,54 @@ function createFactionsWithNeighboringCells() {
   for (let cell of unassignedCells) {
     random(factions).addCell(cell);
   }
+}
+
+function generateDistinctColors(numColors) {
+  let colors = [];
+  let hueStep = 360 / numColors;
+
+  for (let i = 0; i < numColors; i++) {
+    let hue = i * hueStep;
+    let saturation = 70 + random(-10, 10); // 60-80% saturation
+    let lightness = 70 + random(-10, 10); // 60-80% lightness
+
+    // Convert HSL to RGB
+    let rgb = hslToRgb(hue, saturation, lightness);
+    colors.push(color(rgb[0], rgb[1], rgb[2]));
+  }
+
+  // Shuffle the colors to avoid predictable order
+  shuffle(colors, true);
+
+  return colors;
+}
+
+function hslToRgb(h, s, l) {
+  h /= 360;
+  s /= 100;
+  l /= 100;
+  let r, g, b;
+
+  if (s === 0) {
+    r = g = b = l; // achromatic
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
 }
 
 function drawStabilizedVoronoi() {
@@ -254,10 +286,13 @@ function performCellActions() {
 
 function updatePopulationTransfers() {
   for (let i = populationTransfers.length - 1; i >= 0; i--) {
-    populationTransfers[i].update();
+    if (!populationTransfers[i].isUpdated) {
+      populationTransfers[i].update();
+    }
     if (showPopulationTransfers) {
       populationTransfers[i].draw();
     }
+    populationTransfers[i].update();
     if (populationTransfers[i].isDone()) {
       populationTransfers.splice(i, 1);
     }
@@ -280,8 +315,17 @@ class Cell {
     this.centroid = calculateCentroid(polygon);
     this.faction = null;
     this.neighbors = [];
-    this.population = floor(random(50, 80));
+    this.population = floor(random(5, 10));
     this.currentColor = null;
+    this.lastActionTime = millis();
+    this.nextActionTime = this.calculateNextActionTime();
+  }
+
+  calculateNextActionTime() {
+    return (
+      this.lastActionTime +
+      random(actionMinInterval, actionMaxInterval) * animationSpeed
+    );
   }
 
   draw() {
@@ -291,19 +335,31 @@ class Cell {
     }
     endShape(CLOSE);
 
-    push();
-    // Display population
-    fill(0);
-    noStroke();
-    textAlign(CENTER, CENTER);
-    textSize(12);
-    // only display the integer part of the population
-    text(floor(this.population), this.centroid.x, this.centroid.y);
-    pop();
+    if (showCellPopulation) {
+      push();
+      // Display population
+      fill(0);
+      noStroke();
+      textAlign(CENTER, CENTER);
+      textSize(12);
+      // only display the integer part of the population
+      text(floor(this.population), this.centroid.x, this.centroid.y);
+      pop();
+    }
   }
 
   growPopulation() {
-    this.population += random(0.2, 0.4);
+    if (this.population < cellPopulationLimit) {
+      this.population += random(0.2, 0.4);
+    }
+  }
+
+  checkAndPerformAction() {
+    if (millis() >= this.nextActionTime) {
+      this.performAction();
+      this.lastActionTime = millis();
+      this.nextActionTime = this.calculateNextActionTime();
+    }
   }
 
   performAction() {
@@ -312,28 +368,33 @@ class Cell {
       this.growPopulation();
     }
 
-    // Choose an action based on probabilities,
-    let randomValue = random();
-    let action;
-
-    if (randomValue < 0.1) {
-      action = "stay";
-    } else if (randomValue < 0.55) {
-      action = "give";
+    let friendlyNeighbors = this.neighbors.filter(
+      (n) => n.faction === this.faction
+    );
+    // All enemy neighbors
+    if (friendlyNeighbors.length === 0) {
+      this.attackNeighbor();
+      return;
     } else {
-      action = "attack";
-    }
-
-    switch (action) {
-      case "stay":
-        // Do nothing
-        break;
-      case "give":
-        this.givePopulation();
-        break;
-      case "attack":
+      // some enemy some friendly
+      let enemyNeighbors = this.neighbors.filter(
+        (n) => n.faction !== this.faction
+      );
+      if (enemyNeighbors.length > 0) {
         this.attackNeighbor();
-        break;
+        return;
+      } else {
+        // or all friendly
+        // if all friendly neighbors exceed the population limit, do nothing
+        if (
+          friendlyNeighbors.every((n) => n.population >= cellPopulationLimit)
+        ) {
+          return;
+        } else {
+          this.givePopulation();
+          return;
+        }
+      }
     }
   }
 
@@ -342,18 +403,23 @@ class Cell {
       (n) => n.faction === this.faction
     );
     if (friendlyNeighbors.length > 0) {
-      let recipient = random(friendlyNeighbors);
+      // prioritize neighbors with lower population
+      let recipient = friendlyNeighbors.reduce((a, b) =>
+        a.population < b.population ? a : b
+      );
       let amount = random(0.1, 0.2) * this.population;
       this.population -= amount;
-      recipient.population += amount;
 
       // Create a new population transfer animation
       populationTransfers.push(
         new PopulationTransfer(
           this.centroid,
           recipient.centroid,
+          this,
+          recipient,
           amount,
-          color(0, 255, 0)
+          color(0, 255, 0),
+          "give"
         )
       );
     }
@@ -367,44 +433,65 @@ class Cell {
       let target = random(enemyNeighbors);
       let amount = floor(random(0.4, 0.8) * this.population);
       this.population -= amount;
-      target.population -= amount;
 
       populationTransfers.push(
         new PopulationTransfer(
           this.centroid,
           target.centroid,
+          this,
+          target,
           amount,
-          color(255, 0, 0)
+          color(255, 0, 0),
+          "attack"
         )
       );
-
-      if (target.population <= 0) {
-        let oldFaction = target.faction;
-        oldFaction.removeCell(target);
-        this.faction.addCell(target);
-        target.population = abs(target.population);
-
-        // Start color transition animation
-        colorTransitions.push(
-          new ColorTransition(target, oldFaction.color, this.faction.color)
-        );
-      }
     }
   }
 }
 
 class PopulationTransfer {
-  constructor(start, end, amount, color) {
+  constructor(start, end, originCell, recipient, amount, color, type) {
     this.start = start;
     this.end = end;
+    this.originCell = originCell;
+    this.recipient = recipient;
     this.amount = amount;
     this.color = color;
     this.startTime = millis();
     this.duration = actionMinInterval * animationSpeed; // 3 seconds
+    this.type = type;
+    this.isUpdated = false; // New flag to track if update has been called
   }
 
   update() {
-    // No need to update anything here, as we'll calculate the position in the draw method
+    if (this.isUpdated) return; // Skip if already updated
+
+    let progress = (millis() - this.startTime) / this.duration;
+
+    if (progress >= 1) {
+      if (this.recipient.faction !== this.originCell.faction) {
+        this.recipient.population -= this.amount;
+
+        if (this.recipient.population <= 0) {
+          let oldFaction = this.recipient.faction;
+          oldFaction.removeCell(this.recipient);
+          this.originCell.faction.addCell(this.recipient);
+          this.recipient.population = abs(this.recipient.population);
+
+          // Start color transition animation
+          colorTransitions.push(
+            new ColorTransition(
+              this.recipient,
+              oldFaction.color,
+              this.originCell.faction.color
+            )
+          );
+        }
+      } else if (this.recipient.faction === this.originCell.faction) {
+        this.recipient.population += this.amount;
+      }
+      this.isUpdated = true; // Mark as updated
+    }
   }
 
   draw() {
@@ -508,6 +595,10 @@ class ColorTransition {
   }
 
   isDone() {
-    return millis() - this.startTime > this.duration;
+    if (millis() - this.startTime > this.duration) {
+      this.cell.currentColor = null;
+      return true;
+    }
+    return false;
   }
 }
