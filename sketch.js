@@ -2,16 +2,19 @@ let points = [];
 let delaunay, voronoi;
 let frameCount = 0;
 const maxFrames = 50; // Adjust this to control when stabilization occurs
-const cellCount = 200;
-// const numFactions = cellCount / 5;
-const numFactions = 4;
+const cellCount = 500;
+const numFactions = 8;
 const populationChangeInterval = 1000;
 const actionMinInterval = 3000;
 const actionMaxInterval = 5000;
-const animationSpeed = 0.05;
-const showPopulationTransfers = true;
-const showCellPopulation = true;
-const cellPopulationLimit = 50;
+let animationSpeed = 0.01;
+let showPopulationTransfers = false;
+let showCellPopulation = false;
+const cellPopulationLimit = 300;
+const newFactionBonus = 300;
+const minCellGrowth = 3;
+const maxCellGrowth = 5;
+const allowMutations = false;
 
 let cells = [];
 let factions = [];
@@ -19,9 +22,63 @@ let isStabilized = false;
 let lastGrowthTime = 0;
 let populationTransfers = [];
 let colorTransitions = [];
+let lastUpdateTime = 0;
+const updateInterval = 128; // ms
+
+const barHeight = 20;
+const barMargin = 10;
+
+let isMouseDragging = false;
+let newFactionColor = null;
+let cellsToConvert = new Set();
+
+let viewMode = "faction"; // 'faction' or 'population' -> (density view)
+let minPopulation, maxPopulation;
+const MIN_POPULATION_RANGE = 1; // Minimum range to prevent division by zero
+
+// Button and Slider variables
+let viewMovementButton;
+let viewPopulationButton;
+let densityViewButton;
+let animationSpeedSlider;
+let animationSpeedLabel;
+
+function toggleMovement() {
+  showPopulationTransfers = !showPopulationTransfers;
+}
+
+function togglePopulation() {
+  showCellPopulation = !showCellPopulation;
+}
+
+function toggleDensityView() {
+  viewMode = viewMode === "faction" ? "population" : "faction";
+}
+
+function updateAnimationSpeed() {
+  animationSpeed = animationSpeedSlider.value();
+  animationSpeedLabel.html("Time step: " + animationSpeed.toFixed(2));
+}
+
+// Add this function to calculate grayscale color based on population
+function getPopulationColor(population, currentColor) {
+  let normalizedPopulation;
+  if (maxPopulation === minPopulation) {
+    normalizedPopulation = 0.5; // If all populations are the same, use middle gray
+  } else {
+    normalizedPopulation =
+      (population - minPopulation) / (cellPopulationLimit - minPopulation);
+  }
+
+  // Ensure normalizedPopulation is between 0 and 1
+  normalizedPopulation = constrain(normalizedPopulation, 0, 1);
+
+  let colorValue = 255 - Math.floor(normalizedPopulation * 200);
+  return color(colorValue);
+}
 
 function setup() {
-  createCanvas(windowWidth * 0.98, windowHeight * 0.98);
+  createCanvas(windowWidth * 0.99, windowHeight * 0.99);
 
   // Create initial points
   for (let i = 0; i < cellCount; i++) {
@@ -31,6 +88,27 @@ function setup() {
   }
 
   updateVoronoi();
+
+  // Create buttons
+  viewMovementButton = createButton("View movement");
+  viewMovementButton.position(10, height - 40);
+  viewMovementButton.mousePressed(toggleMovement);
+
+  viewPopulationButton = createButton("View population");
+  viewPopulationButton.position(130, height - 40);
+  viewPopulationButton.mousePressed(togglePopulation);
+
+  densityViewButton = createButton("Density View");
+  densityViewButton.position(250, height - 40);
+  densityViewButton.mousePressed(toggleDensityView);
+
+  animationSpeedSlider = createSlider(0.01, 1, 0.01, 0.01);
+  animationSpeedSlider.position(10, height - 70);
+  animationSpeedSlider.style("width", "200px");
+  animationSpeedSlider.input(updateAnimationSpeed);
+
+  animationSpeedLabel = createP("Time step: 0.01");
+  animationSpeedLabel.position(220, height - 85);
 }
 
 function draw() {
@@ -50,6 +128,9 @@ function draw() {
       frameCount++;
     }
   } else {
+    // Update min and max population values
+    updatePopulationRange();
+
     // Draw stabilized Voronoi with factions
     drawStabilizedVoronoi();
 
@@ -67,7 +148,111 @@ function draw() {
     // Update and draw population transfers
     updatePopulationTransfers();
     updateColorTransitions();
+
+    // Draw faction proportion bar
+    drawFactionProportionBar();
+
+    // Handle mouse dragging and highlight
+    if (isMouseDragging) {
+      handleMouseDrag();
+      drawHighlight();
+    }
   }
+}
+
+/// Update the updatePopulationRange function
+function updatePopulationRange() {
+  minPopulation = Infinity;
+  maxPopulation = -Infinity;
+  for (let cell of cells) {
+    minPopulation = Math.min(minPopulation, cell.population);
+    maxPopulation = Math.max(maxPopulation, cell.population);
+  }
+
+  // Ensure there's always a minimum range
+  if (maxPopulation - minPopulation < MIN_POPULATION_RANGE) {
+    maxPopulation = minPopulation + MIN_POPULATION_RANGE;
+  }
+}
+
+function drawFactionProportionBar() {
+  let totalCells = cells.length;
+  let barWidth = width - 2 * barMargin;
+  let x = barMargin;
+  let y = 0 + barHeight;
+
+  // Draw background
+  fill(200);
+  noStroke();
+  rect(x, y, barWidth, barHeight);
+
+  // Check if it's time to update positions
+  let currentTime = millis();
+  let shouldUpdatePositions = currentTime - lastUpdateTime >= updateInterval;
+
+  if (shouldUpdatePositions) {
+    lastUpdateTime = currentTime;
+  }
+
+  // Calculate and draw proportions for each faction
+  for (let i = 0; i < factions.length; i++) {
+    let faction = factions[i];
+    let proportion = faction.cells.length / totalCells;
+    let sectionWidth = proportion * barWidth;
+
+    if (sectionWidth > 0) {
+      fill(faction.color);
+      rect(x, y, sectionWidth, barHeight);
+
+      // Draw label only if the proportion is greater than 0
+      if (proportion > 0) {
+        let percentage = Math.round(proportion * 100);
+        let labelX = x + sectionWidth / 2;
+        let labelY = y + barHeight / 2;
+
+        // Update persisted positions if it's time
+        if (shouldUpdatePositions) {
+          if (!faction.persistedInfo) {
+            faction.persistedInfo = {};
+          }
+          faction.persistedInfo.x = labelX;
+          faction.persistedInfo.y = labelY;
+          faction.persistedInfo.percentage = percentage;
+        }
+
+        textAlign(CENTER, CENTER);
+        textSize(12);
+
+        // Choose text color based on background brightness
+        let brightness =
+          (red(faction.color) * 299 +
+            green(faction.color) * 587 +
+            blue(faction.color) * 114) /
+          1000;
+        fill(brightness > 128 ? 0 : 255);
+
+        // Only draw label if there's enough space and we have persisted positions
+        if (
+          sectionWidth > textWidth(percentage + "%") + 4 &&
+          faction.persistedInfo
+        ) {
+          text(
+            faction.persistedInfo.percentage + "%",
+            faction.persistedInfo.x,
+            faction.persistedInfo.y
+          );
+        }
+      }
+
+      x += sectionWidth;
+    }
+  }
+
+  // Draw border
+  noFill();
+  stroke(0);
+  strokeWeight(2);
+  rect(barMargin, y, barWidth, barHeight);
 }
 
 function drawUnstabilizedVoronoi() {
@@ -181,8 +366,12 @@ function generateDistinctColors(numColors) {
   let colors = [];
   let hueStep = 360 / numColors;
 
+  // Add randomness to the first hue
+  let randomHueOffset = random(0, 360); // Random offset between 0 and 360 degrees
+
   for (let i = 0; i < numColors; i++) {
-    let hue = i * hueStep;
+    // Apply the random offset only to the first color
+    let hue = (i * hueStep + randomHueOffset) % 360;
     let saturation = 70 + random(-10, 10); // 60-80% saturation
     let lightness = 70 + random(-10, 10); // 60-80% lightness
 
@@ -319,6 +508,13 @@ class Cell {
     this.currentColor = null;
     this.lastActionTime = millis();
     this.nextActionTime = this.calculateNextActionTime();
+    this.minCellGrowthRate = random(minCellGrowth - 2, minCellGrowth);
+    this.maxCellGrowthRate = random(maxCellGrowth - 10, maxCellGrowth);
+    this.minAttack = random(0.25, 0.45);
+    this.maxAttack = random(0.7, 0.9);
+    this.minGive = random(0.05, 0.1);
+    this.maxGive = random(0.15, 0.3);
+    this.populationLimit = cellPopulationLimit + random(-20, 20) * 10; // Range: 100 - 500
   }
 
   calculateNextActionTime() {
@@ -329,6 +525,12 @@ class Cell {
   }
 
   draw() {
+    if (viewMode === "faction") {
+      fill(this.currentColor || this.faction.color);
+    } else if (viewMode === "population") {
+      fill(getPopulationColor(this.population, this.currentColor));
+    }
+
     beginShape();
     for (let i = 0; i < this.polygon.length; i++) {
       vertex(this.polygon[i][0], this.polygon[i][1]);
@@ -337,20 +539,24 @@ class Cell {
 
     if (showCellPopulation) {
       push();
-      // Display population
       fill(0);
       noStroke();
       textAlign(CENTER, CENTER);
       textSize(12);
-      // only display the integer part of the population
       text(floor(this.population), this.centroid.x, this.centroid.y);
       pop();
     }
   }
 
   growPopulation() {
-    if (this.population < cellPopulationLimit) {
-      this.population += random(0.2, 0.4);
+    if (this.population < this.populationLimit) {
+      // scale the growth rate based on the current population against max cell population
+      this.population += lerp(
+        // linear interpolation
+        this.minCellGrowthRate,
+        this.maxCellGrowthRate,
+        this.population / maxPopulation
+      );
     }
   }
 
@@ -373,16 +579,32 @@ class Cell {
     );
     // All enemy neighbors
     if (friendlyNeighbors.length === 0) {
-      this.attackNeighbor();
-      return;
+      // 25% attack, 75% do nothing
+      if (random() > 0.75) {
+        this.attackNeighbor();
+        return;
+      } else {
+        return;
+      }
     } else {
       // some enemy some friendly
       let enemyNeighbors = this.neighbors.filter(
         (n) => n.faction !== this.faction
       );
       if (enemyNeighbors.length > 0) {
-        this.attackNeighbor();
-        return;
+        // 25% attack, 75% do nothing
+        if (random() > 0.75) {
+          this.attackNeighbor();
+          return;
+        } else {
+          // 1% chance to mutate and change faction
+          if (random() < 0.001 && allowMutations) {
+            newFactionColor = generateDistinctColors(1)[0];
+            createNewFaction([this], cellPopulationLimit);
+            return;
+          }
+          return;
+        }
       } else {
         // or all friendly
         // if all friendly neighbors exceed the population limit, do nothing
@@ -391,8 +613,19 @@ class Cell {
         ) {
           return;
         } else {
-          this.givePopulation();
-          return;
+          if (random() < 0.001 && allowMutations) {
+            newFactionColor = generateDistinctColors(1)[0];
+            // create new faction with this cell and all friendly neighbors
+            createNewFaction([this, ...friendlyNeighbors], cellPopulationLimit);
+            return;
+          }
+          // 25% give, 75% do nothing
+          if (random() > 0.75) {
+            this.givePopulation();
+            return;
+          } else {
+            return;
+          }
         }
       }
     }
@@ -407,7 +640,9 @@ class Cell {
       let recipient = friendlyNeighbors.reduce((a, b) =>
         a.population < b.population ? a : b
       );
-      let amount = random(0.1, 0.2) * this.population;
+      let amount =
+        lerp(this.minGive, this.maxGive, this.population / maxPopulation) *
+        this.population;
       this.population -= amount;
 
       // Create a new population transfer animation
@@ -431,7 +666,9 @@ class Cell {
     );
     if (enemyNeighbors.length > 0) {
       let target = random(enemyNeighbors);
-      let amount = floor(random(0.4, 0.8) * this.population);
+      let amount = floor(
+        random(this.minAttack, this.maxAttack) * this.population
+      );
       this.population -= amount;
 
       populationTransfers.push(
@@ -561,7 +798,6 @@ class Faction {
 
   draw() {
     for (let cell of this.cells) {
-      fill(cell.currentColor || this.color);
       cell.draw();
     }
   }
@@ -601,4 +837,103 @@ class ColorTransition {
     }
     return false;
   }
+}
+
+// ------------------------------
+function mousePressed() {
+  if (isStabilized) {
+    // console.log("mousePressed");
+    isMouseDragging = true;
+    newFactionColor = generateDistinctColors(1)[0];
+    cellsToConvert.clear();
+  }
+}
+
+// Add a new keyPressed function to handle view mode toggle
+function keyPressed() {
+  // console.log("keyPressed");
+  if (key === "v" || key === "V") {
+    toggleViewMode();
+  }
+}
+
+// The toggleViewMode function remains the same
+function toggleViewMode() {
+  viewMode = viewMode === "faction" ? "population" : "faction";
+}
+
+function mouseReleased() {
+  if (isStabilized) {
+    isMouseDragging = false;
+    if (cellsToConvert.size > 0) {
+      createNewFaction(Array.from(cellsToConvert), newFactionBonus);
+    }
+    cellsToConvert.clear();
+  }
+}
+
+function handleMouseDrag() {
+  let mouseCell = cells.find((cell) =>
+    pointInPolygon(mouseX, mouseY, cell.polygon)
+  );
+
+  if (mouseCell && !cellsToConvert.has(mouseCell)) {
+    cellsToConvert.add(mouseCell);
+  }
+}
+
+function drawHighlight() {
+  for (let cell of cellsToConvert) {
+    // 50% transparency
+    fill(
+      newFactionColor.levels[0],
+      newFactionColor.levels[1],
+      newFactionColor.levels[2],
+      127
+    );
+    noStroke();
+    beginShape();
+    for (let i = 0; i < cell.polygon.length; i++) {
+      vertex(cell.polygon[i][0], cell.polygon[i][1]);
+    }
+    endShape(CLOSE);
+  }
+}
+function createNewFaction(cellsToConvert, bonus = 30) {
+  let newFaction = new Faction(newFactionColor);
+  factions.push(newFaction);
+
+  for (let cell of cellsToConvert) {
+    let oldFaction = cell.faction;
+    if (oldFaction) {
+      oldFaction.removeCell(cell);
+    }
+    cell.population += bonus;
+    newFaction.addCell(cell);
+
+    // Start color transition animation
+    colorTransitions.push(
+      new ColorTransition(cell, cell.currentColor, newFactionColor)
+    );
+
+    // Check if the old faction should be removed
+    if (oldFaction && oldFaction.cells.length === 0) {
+      factions = factions.filter((f) => f !== oldFaction);
+    }
+  }
+}
+
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    let xi = polygon[i][0],
+      yi = polygon[i][1];
+    let xj = polygon[j][0],
+      yj = polygon[j][1];
+
+    let intersect =
+      yi > y != yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
 }
